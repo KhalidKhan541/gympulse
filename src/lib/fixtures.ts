@@ -365,3 +365,99 @@ export const GP_REVENUE_MTD = GP_INVOICES.filter((i) => i.status === "paid").red
 export const GP_OPEN_LEADS = GP_LEADS.filter(
   (l) => l.status !== "closed"
 ).length;
+
+/* ----------------------------- Selectors & aggregations ----------------------------- */
+
+export const membersByStatus = (status: MemberStatus): Member[] =>
+  GP_MEMBERS.filter((m) => m.status === status);
+
+/** Average monthly attendance across active members. */
+export const avgAttendance = (): number => {
+  const active = membersByStatus("active");
+  if (active.length === 0) return 0;
+  const total = active.reduce((sum, m) => sum + m.attendanceThisMonth, 0);
+  return Math.round((total / active.length) * 10) / 10;
+};
+
+/** Members flagged with an injury risk or pending clearance. */
+export const membersWithHealthFlags = (): Member[] =>
+  GP_MEMBERS.filter((m) => m.healthFlags.injuryRisk || !m.healthFlags.cleared);
+
+export const leadsByStatus = (status: LeadStatus): Lead[] =>
+  GP_LEADS.filter((l) => l.status === status);
+
+/** Weighted pipeline value — open leads sorted by score descending. */
+export const hotLeads = (limit = 5): Lead[] =>
+  GP_LEADS.filter((l) => l.status !== "closed")
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit);
+
+export const classesByTrainer = (trainerId: string): GymClass[] =>
+  GP_CLASSES.filter((c) => c.trainerId === trainerId);
+
+/** Classes at or above 90% capacity — candidates for a waitlist. */
+export const nearCapacityClasses = (): GymClass[] =>
+  GP_CLASSES.filter((c) => c.enrolled / c.capacity >= 0.9);
+
+export const trainerById = (id: string): Trainer | undefined =>
+  GP_TRAINERS.find((t) => t.id === id);
+
+export const trainerName = (id: string): string =>
+  trainerById(id)?.name ?? "Unassigned";
+
+export const programsByDiscipline = (
+  discipline: Program["discipline"]
+): Program[] => GP_PROGRAMS.filter((p) => p.discipline === discipline);
+
+export const attendanceForDate = (date: string): AttendanceRecord[] =>
+  GP_ATTENDANCE.filter((a) => a.date === date);
+
+export const attendanceForMember = (memberId: string): AttendanceRecord[] =>
+  GP_ATTENDANCE.filter((a) => a.memberId === memberId);
+
+/** Checked-in rate over all recorded check-ins. */
+export const attendanceRate = (): number => {
+  if (GP_ATTENDANCE.length === 0) return 0;
+  const present = GP_ATTENDANCE.filter((a) => a.status === "checked_in").length;
+  return Math.round((present / GP_ATTENDANCE.length) * 1000) / 10;
+};
+
+export const lowStockProducts = (threshold = 15): PosProduct[] =>
+  GP_POS_PRODUCTS.filter((p) => p.stock <= threshold);
+
+/** Top sellers by units sold. */
+export const bestSellers = (limit = 5): PosProduct[] =>
+  [...GP_POS_PRODUCTS].sort((a, b) => b.sold - a.sold).slice(0, limit);
+
+export const posRevenue = (): number =>
+  GP_POS_PRODUCTS.reduce((sum, p) => sum + p.price * p.sold, 0);
+
+export const invoicesByStatus = (status: InvoiceStatus): Invoice[] =>
+  GP_INVOICES.filter((i) => i.status === status);
+
+export const outstandingBalance = (): number =>
+  GP_INVOICES.filter((i) => i.status === "due" || i.status === "overdue").reduce(
+    (sum, i) => sum + i.amount,
+    0
+  );
+
+/** Month-over-month revenue change (fraction, e.g. 0.062 = +6.2%). */
+export const revenueGrowth = (index = GP_KPI.length - 1): number => {
+  if (index <= 0) return 0;
+  const prev = GP_KPI[index - 1].revenue;
+  if (prev === 0) return 0;
+  return (GP_KPI[index].revenue - prev) / prev;
+};
+
+/** Latest month KPI snapshot. */
+export const latestKpi = (): MonthlyKpi => GP_KPI[GP_KPI.length - 1];
+
+/** Total revenue across the 12-month KPI window. */
+export const annualRevenue = (): number =>
+  GP_KPI.reduce((sum, m) => sum + m.revenue, 0);
+
+/** Average churn rate across the KPI window (fraction). */
+export const avgChurn = (): number => {
+  const total = GP_KPI.reduce((sum, m) => sum + m.churn, 0);
+  return Math.round((total / GP_KPI.length) * 1000) / 1000;
+};
