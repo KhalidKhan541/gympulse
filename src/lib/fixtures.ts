@@ -366,6 +366,15 @@ export const GP_OPEN_LEADS = GP_LEADS.filter(
   (l) => l.status !== "closed"
 ).length;
 
+/** Ordered pipeline stages — handy for status chips, filters and charts. */
+export const LEAD_STATUS: LeadStatus[] = [
+  "new",
+  "contacted",
+  "trial",
+  "booked",
+  "closed",
+];
+
 /* ----------------------------- Selectors & aggregations ----------------------------- */
 
 export const membersByStatus = (status: MemberStatus): Member[] =>
