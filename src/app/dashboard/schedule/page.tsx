@@ -1,627 +1,878 @@
 "use client";
 
+/* ==================================================================
+ * GymPulse — Weekly Class Schedule
+ * Time-positioned week grid (Mon–Sun) built from GP_CLASSES, with a
+ * day-list view, intensity filters, an hourly load chart and a
+ * booking detail panel. Static demo clock keeps SSR/CSR identical.
+ * ================================================================== */
+
 import { useMemo, useState } from "react";
-import toast from "react-hot-toast";
 import {
-  CalendarClock,
+  Bar,
+  BarChart,
+  CartesianGrid,
+  Cell,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
+import {
   CalendarDays,
+  CheckCircle2,
+  ChevronRight,
   Clock,
+  Flame,
+  Gauge,
   LayoutGrid,
   List,
-  MapPin,
-  MessageSquare,
-  Ticket,
+  Maximize2,
+  Timer,
+  Users,
   X,
 } from "lucide-react";
-import Card, { CardContent, CardHeader, CardTitle } from "@/components/ui/Card";
+import toast from "react-hot-toast";
+import Card, {
+  CardContent,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/Card";
 import MetricCard from "@/components/ui/MetricCard";
-import Badge, { type BadgeVariant } from "@/components/ui/Badge";
+import Badge from "@/components/ui/Badge";
 import { Avatar } from "@/components/ui/Avatar";
 import { Button } from "@/components/ui/Button";
-import { GP_CLASSES, GP_TRAINERS, type Intensity } from "@/lib/fixtures";
-import { cn, formatDate, formatDuration, formatNumber } from "@/lib/utils";
+import {
+  GP_CLASSES,
+  trainerById,
+  type GymClass,
+  type Intensity,
+} from "@/lib/fixtures";
+import { cn, formatNumber } from "@/lib/utils";
 
 /* ------------------------------------------------------------------ */
-/* Demo time — the schedule always renders the fixture week so server   */
-/* and client agree (no hydration drift).                              */
+/* Static demo clock — fixed label avoids hydration drift.             */
 /* ------------------------------------------------------------------ */
 
-const TODAY_ISO = "2026-10-08";
-const [T_Y, T_M, T_D] = TODAY_ISO.split("-").map(Number);
-const TODAY = new Date(T_Y, T_M - 1, T_D);
-/** 0 = Monday … 6 = Sunday. */
-const TODAY_WEEK_IDX = (TODAY.getDay() + 6) % 7;
-const WEEK_START = new Date(T_Y, T_M - 1, T_D - TODAY_WEEK_IDX);
+const WEEK_LABEL = "Oct 5 – 11, 2026";
 
-const DOW_ORDER = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-const DOW_FULL = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
-const MONTH_SHORT = [
-  "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-];
+const DAYS = [
+  "Mon",
+  "Tue",
+  "Wed",
+  "Thu",
+  "Fri",
+  "Sat",
+  "Sun",
+] as const;
+type Day = (typeof DAYS)[number];
 
-const WEEK_DAYS = Array.from({ length: 7 }, (_, i) =>
-  new Date(WEEK_START.getFullYear(), WEEK_START.getMonth(), WEEK_START.getDate() + i)
-);
+const DAY_FULL: Record<Day, string> = {
+  Mon: "Monday",
+  Tue: "Tuesday",
+  Wed: "Wednesday",
+  Thu: "Thursday",
+  Fri: "Friday",
+  Sat: "Saturday",
+  Sun: "Sunday",
+};
 
-/* ------------------------- Time axis ------------------------------- */
-
-const DAY_START = 5 * 60; // 5:00 AM
-const DAY_END = 22 * 60; // 10:00 PM
-const HOUR_H = 70; // px per hour
-const GRID_H = ((DAY_END - DAY_START) / 60) * HOUR_H;
-const HOURS = Array.from({ length: (DAY_END - DAY_START) / 60 + 1 }, (_, i) => 5 + i);
-
-function fmtClock(totalMinutes: number): string {
-  const h24 = Math.floor(totalMinutes / 60) % 24;
-  const mins = totalMinutes % 60;
-  const suffix = h24 >= 12 ? "PM" : "AM";
-  const h = h24 % 12 === 0 ? 12 : h24 % 12;
-  return `${h}:${String(mins).padStart(2, "0")} ${suffix}`;
-}
-
-function fmtHour(hour: number): string {
-  const suffix = hour >= 12 ? "PM" : "AM";
-  const h = hour % 12 === 0 ? 12 : hour % 12;
-  return `${h} ${suffix}`;
-}
-
-/* ------------------------- Schedule parsing ------------------------ */
-
-function toMinutes(time: string): number {
-  const m = time.match(/(\d{1,2}):(\d{2})\s*(AM|PM)/i);
-  if (!m) return 0;
-  const hour = Number(m[1]) % 12;
-  return (hour + (/pm/i.test(m[3]) ? 12 : 0)) * 60 + Number(m[2]);
-}
-
-function parseSchedule(schedule: string): { days: string[]; minutes: number } {
-  const m = schedule.match(/^([A-Za-z/]+)\s+(.+)$/);
-  const days = (m?.[1] ?? "").split("/").filter(Boolean);
-  return { days, minutes: toMinutes((m?.[2] ?? "6:00 AM").trim()) };
-}
-
-/* ------------------------- Sessions -------------------------------- */
+/** Grid window — classes outside 5 AM–10 PM are clamped into view. */
+const START_HOUR = 5;
+const END_HOUR = 22;
+const PX_PER_HOUR = 72;
 
 const ROOMS: Record<string, string> = {
-  c01: "Studio A",
-  c02: "Studio B",
-  c03: "Studio C (mats)",
+  c01: "Strength Floor",
+  c02: "Studio A",
+  c03: "Yoga Loft",
   c04: "Mobility Studio",
   c05: "Cycle Room",
-  c06: "Turf Floor",
-  c07: "Studio C (mats)",
-  c08: "Platform Room",
-  c09: "Turf Floor",
-  c10: "Boxing Room",
+  c06: "Studio B",
+  c07: "Yoga Loft",
+  c08: "Olympic Platform",
+  c09: "Studio A",
+  c10: "Combat Room",
 };
 
-interface Session {
-  id: string;
-  classId: string;
-  name: string;
-  dayIdx: number; // 0 = Mon … 6 = Sun
-  start: number; // minutes from midnight
-  duration: number;
-  trainerId: string;
-  room: string;
-  enrolled: number;
-  capacity: number;
-  intensity: Intensity;
+/* ------------------------------------------------------------------ */
+/* Schedule parsing                                                    */
+/* ------------------------------------------------------------------ */
+
+interface Occurrence {
+  key: string;
+  cls: GymClass;
+  day: Day;
+  startMin: number; // minutes from midnight
+  endMin: number;
 }
 
-const SESSIONS: Session[] = GP_CLASSES.flatMap((cls) => {
-  const { days, minutes } = parseSchedule(cls.schedule);
-  return days.map((day) => {
-    const dayIdx = DOW_ORDER.indexOf(day);
-    return {
-      id: `${cls.id}-${dayIdx}`,
-      classId: cls.id,
-      name: cls.name,
-      dayIdx,
-      start: minutes,
-      duration: cls.durationMin,
-      trainerId: cls.trainerId,
-      room: ROOMS[cls.id] ?? "TBD",
-      enrolled: cls.enrolled,
-      capacity: cls.capacity,
-      intensity: cls.intensity,
-    };
-  });
-}).filter((s) => s.dayIdx >= 0);
+const TIME_RE = /^(\d{1,2}):(\d{2})\s*(AM|PM)$/i;
 
-/**
- * Side-by-side placement for overlapping sessions: cluster sessions that
- * intersect, then greedily assign columns within each cluster.
- */
-function buildLayout(sessions: Session[]): Map<string, { col: number; cols: number }> {
-  const sorted = [...sessions].sort((a, b) => a.start - b.start || b.duration - a.duration);
-  const placed = new Map<string, { col: number; cols: number }>();
+function parseTimeToMin(raw: string): number {
+  const m = TIME_RE.exec(raw.trim());
+  if (!m) return 9 * 60;
+  let hour = Number(m[1]) % 12;
+  const minute = Number(m[2]);
+  if (m[3].toUpperCase() === "PM") hour += 12;
+  return hour * 60 + minute;
+}
 
-  let cluster: Session[] = [];
-  let clusterEnd = -1;
+/** "Mon/Wed/Fri 6:00 AM" -> { days, startMin } */
+function parseSchedule(schedule: string): { days: Day[]; startMin: number } {
+  const parts = schedule.trim().split(/\s+/);
+  const timeRaw = parts[parts.length - 1] ?? "9:00 AM";
+  const dayRaw = parts.slice(0, -1).join(" ");
+  const days = dayRaw
+    .split("/")
+    .map((d) => d.trim().slice(0, 3))
+    .filter((d): d is Day =>
+      DAYS.includes(d.charAt(0).toUpperCase() + d.slice(1, 3).toLowerCase() as Day)
+    )
+    .map((d) => (d.charAt(0).toUpperCase() + d.slice(1, 3).toLowerCase()) as Day);
+  return { days: days.length ? days : ["Mon"], startMin: parseTimeToMin(timeRaw) };
+}
 
-  const flush = () => {
-    if (cluster.length === 0) return;
-    const colEnds: number[] = [];
-    const colOf = new Map<string, number>();
-    for (const s of cluster) {
-      let col = colEnds.findIndex((end) => end <= s.start);
-      if (col === -1) {
-        col = colEnds.length;
-        colEnds.push(0);
-      }
-      colEnds[col] = s.start + s.duration;
-      colOf.set(s.id, col);
+function buildOccurrences(): Occurrence[] {
+  const out: Occurrence[] = [];
+  for (const cls of GP_CLASSES) {
+    const { days, startMin } = parseSchedule(cls.schedule);
+    for (const day of days) {
+      out.push({
+        key: `${cls.id}-${day}`,
+        cls,
+        day,
+        startMin,
+        endMin: startMin + cls.durationMin,
+      });
     }
-    for (const s of cluster) {
-      placed.set(s.id, { col: colOf.get(s.id) ?? 0, cols: colEnds.length });
-    }
-    cluster = [];
-    clusterEnd = -1;
-  };
-
-  for (const s of sorted) {
-    if (cluster.length > 0 && s.start >= clusterEnd) flush();
-    cluster.push(s);
-    clusterEnd = Math.max(clusterEnd, s.start + s.duration);
   }
-  flush();
-  return placed;
+  return out;
 }
 
-const LAYOUT = buildLayout(SESSIONS);
-
-const INTENSITY_LABEL: Record<Intensity, string> = {
-  low: "Low",
-  medium: "Medium",
-  high: "High",
-};
-
-const INTENSITY_VARIANT: Record<Intensity, BadgeVariant> = {
-  low: "gp",
-  medium: "warning",
-  high: "danger",
-};
-
-const BLOCK_STYLE: Record<Intensity, string> = {
-  low: "border-l-[#84cc16] bg-[#84cc16]/15 hover:bg-[#84cc16]/25",
-  medium: "border-l-amber-500 bg-amber-500/15 hover:bg-amber-500/25",
-  high: "border-l-rose-500 bg-rose-500/15 hover:bg-rose-500/25",
-};
+function fmtTime(min: number): string {
+  const h24 = Math.floor(min / 60) % 24;
+  const m = min % 60;
+  const suffix = h24 >= 12 ? "PM" : "AM";
+  const h = h24 % 12 || 12;
+  return `${h}:${String(m).padStart(2, "0")} ${suffix}`;
+}
 
 /* ------------------------------------------------------------------ */
-/* Page                                                                 */
+/* Intensity styling                                                   */
 /* ------------------------------------------------------------------ */
+
+const INTENSITY_UI: Record<
+  Intensity,
+  { label: string; chip: "danger" | "warning" | "info"; block: string; dot: string }
+> = {
+  high: {
+    label: "High",
+    chip: "danger",
+    block:
+      "border-rose-500/40 bg-rose-500/10 hover:bg-rose-500/15 border-l-rose-500",
+    dot: "bg-rose-500",
+  },
+  medium: {
+    label: "Medium",
+    chip: "warning",
+    block:
+      "border-primary-500/40 bg-primary-500/10 hover:bg-primary-500/15 border-l-primary-500",
+    dot: "bg-primary-500",
+  },
+  low: {
+    label: "Low",
+    chip: "info",
+    block: "border-sky-500/40 bg-sky-500/10 hover:bg-sky-500/15 border-l-sky-500",
+    dot: "bg-sky-500",
+  },
+};
+
+const CHART_COLOR: Record<Intensity, string> = {
+  high: "#f43f5e",
+  medium: "#84cc16",
+  low: "#0ea5e9",
+};
+
+/* ================================================================== */
+/* Page                                                                */
+/* ================================================================== */
 
 export default function SchedulePage() {
-  const [view, setView] = useState<"week" | "day">("week");
-  const [dayIdx, setDayIdx] = useState(TODAY_WEEK_IDX);
-  const [selected, setSelected] = useState<Session | null>(null);
+  const occurrences = useMemo(() => buildOccurrences(), []);
 
-  const trainerById = useMemo(
-    () => new Map(GP_TRAINERS.map((t) => [t.id, t])),
-    []
+  const [view, setView] = useState<"week" | "day">("week");
+  const [activeDay, setActiveDay] = useState<Day>("Mon");
+  const [intensity, setIntensity] = useState<"all" | Intensity>("all");
+  const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const [booked, setBooked] = useState<Set<string>>(new Set());
+
+  const filtered = useMemo(
+    () =>
+      intensity === "all"
+        ? occurrences
+        : occurrences.filter((o) => o.cls.intensity === intensity),
+    [occurrences, intensity]
   );
 
-  const stats = useMemo(() => {
-    const hourCounts = new Map<number, number>();
-    for (const s of SESSIONS) {
-      const hour = Math.floor(s.start / 60);
-      hourCounts.set(hour, (hourCounts.get(hour) ?? 0) + 1);
-    }
-    const [peakHour, peakCount] = Array.from(hourCounts.entries()).sort(
-      (a, b) => b[1] - a[1] || a[0] - b[0]
-    )[0];
+  const dayOccurrences = useMemo(
+    () => filtered.filter((o) => o.day === activeDay).sort((a, b) => a.startMin - b.startMin),
+    [filtered, activeDay]
+  );
 
-    const openSlots = SESSIONS.reduce(
-      (sum, s) => sum + Math.max(0, s.capacity - s.enrolled),
+  const selected = useMemo(
+    () => filtered.find((o) => o.key === selectedKey) ?? null,
+    [filtered, selectedKey]
+  );
+
+  /* --------------------------- stats --------------------------- */
+
+  const stats = useMemo(() => {
+    const sessions = filtered.length;
+    const openSlots = filtered.reduce(
+      (sum, o) => sum + Math.max(0, o.cls.capacity - o.cls.enrolled),
       0
     );
-    const openSessions = SESSIONS.filter((s) => s.enrolled < s.capacity).length;
-    const formats = new Set(SESSIONS.map((s) => s.classId)).size;
+    const fillRate = filtered.length
+      ? Math.round(
+          (filtered.reduce((s, o) => s + o.cls.enrolled / o.cls.capacity, 0) /
+            filtered.length) *
+            100
+        )
+      : 0;
 
-    return {
-      sessions: SESSIONS.length,
-      formats,
-      peakHour: fmtHour(peakHour),
-      peakCount,
-      openSlots,
-      openSessions,
-    };
-  }, []);
+    const byHour = new Map<number, number>();
+    for (const o of filtered) {
+      const h = Math.floor(o.startMin / 60);
+      byHour.set(h, (byHour.get(h) ?? 0) + 1);
+    }
+    let peakHour = -1;
+    let peakCount = 0;
+    for (const [h, c] of byHour) {
+      if (c > peakCount) {
+        peakCount = c;
+        peakHour = h;
+      }
+    }
 
-  const weekLabel = `${formatDate(WEEK_DAYS[0], "MMM d")} – ${formatDate(
-    WEEK_DAYS[6],
-    "MMM d, yyyy"
-  )}`;
+    const hourChart = Array.from({ length: END_HOUR - START_HOUR }, (_, i) => {
+      const h = START_HOUR + i;
+      return { hour: fmtTime(h * 60).replace(":00", ""), sessions: byHour.get(h) ?? 0 };
+    });
 
-  const visibleDays = view === "week" ? WEEK_DAYS.map((_, i) => i) : [dayIdx];
+    return { sessions, openSlots, fillRate, peakHour, peakCount, hourChart };
+  }, [filtered]);
 
-  const detailTrainer = selected ? trainerById.get(selected.trainerId) : undefined;
-  const detailDay = selected ? DOW_FULL[selected.dayIdx] : "";
-  const spotsLeft = selected ? Math.max(0, selected.capacity - selected.enrolled) : 0;
+  /* ------------------------- interactions ------------------------- */
+
+  const toggleBook = (o: Occurrence) => {
+    const cls = o.cls;
+    if (cls.enrolled >= cls.capacity && !booked.has(o.key)) {
+      toast.error(`${cls.name} is full — join the waitlist instead`);
+      return;
+    }
+    setBooked((prev) => {
+      const next = new Set(prev);
+      if (next.has(o.key)) {
+        next.delete(o.key);
+        toast.success(`Drop-in released for ${cls.name} (${DAY_FULL[o.day]})`);
+      } else {
+        next.add(o.key);
+        toast.success(`Drop-in booked: ${cls.name} — ${DAY_FULL[o.day]} ${fmtTime(o.startMin)}`);
+      }
+      return next;
+    });
+  };
+
+  const openDetail = (o: Occurrence) => setSelectedKey(o.key);
+  const closeDetail = () => setSelectedKey(null);
+
+  /* --------------------------------------------------------------- */
+
+  const gridHeight = (END_HOUR - START_HOUR) * PX_PER_HOUR;
 
   return (
-    <div className="mx-auto max-w-7xl space-y-6 p-4 sm:p-6 lg:p-8">
-      {/* Header */}
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+    <div className="space-y-6">
+      {/* ------------------------- header ------------------------- */}
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold tracking-tight">Schedule</h1>
           <p className="mt-1 text-sm text-[var(--gp-text-muted)]">
-            {weekLabel} · {stats.sessions} sessions across {stats.formats} formats
+            Weekly class timetable · {WEEK_LABEL}
           </p>
         </div>
-        <div
-          className="inline-flex self-start rounded-full bg-slate-100 p-1 sm:self-auto dark:bg-slate-800"
-          role="group"
-          aria-label="Schedule view"
-        >
-          <button
-            type="button"
-            onClick={() => setView("week")}
-            aria-pressed={view === "week"}
-            className={cn(
-              "inline-flex items-center gap-1.5 rounded-full px-4 py-1.5 text-xs font-medium transition-colors",
-              view === "week"
-                ? "bg-white text-slate-900 shadow-sm dark:bg-slate-700 dark:text-white"
-                : "text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white"
-            )}
-          >
-            <LayoutGrid className="h-3.5 w-3.5" />
-            Week
-          </button>
-          <button
-            type="button"
-            onClick={() => setView("day")}
-            aria-pressed={view === "day"}
-            className={cn(
-              "inline-flex items-center gap-1.5 rounded-full px-4 py-1.5 text-xs font-medium transition-colors",
-              view === "day"
-                ? "bg-white text-slate-900 shadow-sm dark:bg-slate-700 dark:text-white"
-                : "text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white"
-            )}
-          >
-            <List className="h-3.5 w-3.5" />
-            Day
-          </button>
+        <div className="flex items-center gap-2">
+          <div className="flex rounded-lg border border-[var(--gp-border)] bg-[var(--gp-surface)] p-1">
+            <button
+              type="button"
+              onClick={() => setView("week")}
+              aria-pressed={view === "week"}
+              className={cn(
+                "flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors",
+                view === "week"
+                  ? "bg-primary-500 text-white shadow-sm"
+                  : "text-[var(--gp-text-muted)] hover:text-[var(--gp-text)]"
+              )}
+            >
+              <LayoutGrid className="h-3.5 w-3.5" aria-hidden />
+              Week
+            </button>
+            <button
+              type="button"
+              onClick={() => setView("day")}
+              aria-pressed={view === "day"}
+              className={cn(
+                "flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors",
+                view === "day"
+                  ? "bg-primary-500 text-white shadow-sm"
+                  : "text-[var(--gp-text-muted)] hover:text-[var(--gp-text)]"
+              )}
+            >
+              <List className="h-3.5 w-3.5" aria-hidden />
+              Day
+            </button>
+          </div>
         </div>
       </div>
 
-      {/* Stat cards */}
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+      {/* ------------------------- stats ------------------------- */}
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <MetricCard
           title="Sessions this week"
           value={formatNumber(stats.sessions)}
-          subvalue={`${stats.formats} unique formats`}
-          hint="Mon–Sun · repeating weekly"
-          icon={<CalendarDays className="h-5 w-5" />}
+          subvalue={`${filtered.length ? new Set(filtered.map((o) => o.cls.id)).size : 0} unique classes`}
+          icon={<CalendarDays className="h-5 w-5" aria-hidden />}
           iconTone="lime"
         />
         <MetricCard
           title="Peak hour"
-          value={stats.peakHour}
-          subvalue={`${stats.peakCount} sessions start in this hour`}
-          hint="Busiest coaching block"
-          icon={<Clock className="h-5 w-5" />}
-          iconTone="amber"
+          value={stats.peakHour >= 0 ? fmtTime(stats.peakHour * 60) : "—"}
+          subvalue={
+            stats.peakHour >= 0 ? `${stats.peakCount} sessions on the hour` : "No sessions"
+          }
+          icon={<Flame className="h-5 w-5" aria-hidden />}
+          iconTone="rose"
         />
         <MetricCard
           title="Open slots"
           value={formatNumber(stats.openSlots)}
-          subvalue={`Across ${stats.openSessions} sessions with space`}
-          hint="Bookable right now"
-          icon={<Ticket className="h-5 w-5" />}
+          subvalue="Across all scheduled classes"
+          icon={<Users className="h-5 w-5" aria-hidden />}
           iconTone="sky"
+        />
+        <MetricCard
+          title="Avg fill rate"
+          value={`${stats.fillRate}%`}
+          subvalue="Enrolled vs capacity"
+          icon={<Gauge className="h-5 w-5" aria-hidden />}
+          iconTone="amber"
         />
       </div>
 
-      {/* Day picker (day view) + legend */}
-      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-        {view === "day" ? (
-          <div className="flex flex-wrap gap-1.5" role="tablist" aria-label="Pick a day">
-            {DOW_ORDER.map((d, i) => (
+      {/* --------------------- intensity filter --------------------- */}
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs font-medium text-[var(--gp-text-muted)]">
+          Intensity:
+        </span>
+        {(["all", "low", "medium", "high"] as const).map((i) => (
+          <button
+            key={i}
+            type="button"
+            onClick={() => setIntensity(i)}
+            className={cn(
+              "gp-btn px-3 py-1.5 text-xs capitalize",
+              intensity === i ? "gp-btn-primary" : "gp-btn-ghost"
+            )}
+          >
+            {i === "all" ? "All levels" : i}
+          </button>
+        ))}
+      </div>
+
+      {/* ----------------------- day switcher ---------------------- */}
+      {view === "day" && (
+        <div className="flex flex-wrap gap-2">
+          {DAYS.map((d) => {
+            const count = filtered.filter((o) => o.day === d).length;
+            return (
               <button
                 key={d}
                 type="button"
-                role="tab"
-                aria-selected={dayIdx === i}
-                onClick={() => setDayIdx(i)}
+                onClick={() => setActiveDay(d)}
+                aria-pressed={activeDay === d}
                 className={cn(
-                  "gp-btn px-3 py-1.5 text-xs",
-                  dayIdx === i ? "gp-btn-primary" : "gp-btn-ghost"
+                  "flex items-center gap-2 rounded-lg border px-3.5 py-2 text-sm font-medium transition-colors",
+                  activeDay === d
+                    ? "border-primary-500/50 bg-primary-500/10 text-primary-600 dark:text-primary-400"
+                    : "border-[var(--gp-border)] bg-[var(--gp-surface)] text-[var(--gp-text-muted)] hover:text-[var(--gp-text)]"
                 )}
               >
-                {d} {formatDate(WEEK_DAYS[i], "MMM d")}
-                {i === TODAY_WEEK_IDX && (
-                  <span className="ml-1 rounded-full bg-current/20 px-1.5 py-px text-[9px] font-bold uppercase">
-                    today
-                  </span>
-                )}
-              </button>
-            ))}
-          </div>
-        ) : (
-          <p className="text-sm text-[var(--gp-text-muted)]">
-            <CalendarClock className="mr-1.5 inline h-4 w-4 align-[-2px]" />
-            Click any block to open session details
-          </p>
-        )}
-        <div className="flex flex-wrap items-center gap-3 text-xs font-medium text-[var(--gp-text-muted)]">
-          {(["low", "medium", "high"] as const).map((i) => (
-            <span key={i} className="flex items-center gap-1.5">
-              <span
-                className={cn("h-3 w-3 rounded-sm border-l-2", BLOCK_STYLE[i])}
-                aria-hidden
-              />
-              {INTENSITY_LABEL[i]} intensity
-            </span>
-          ))}
-        </div>
-      </div>
-
-      {/* Grid + detail panel */}
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
-        <Card>
-          <CardContent className="p-0">
-            <div className="overflow-x-auto">
-              <div className="min-w-[860px] p-4">
-                {/* Day headers */}
-                <div
-                  className="grid gap-px"
-                  style={{
-                    gridTemplateColumns: `56px repeat(${visibleDays.length}, minmax(0,1fr))`,
-                  }}
+                {DAY_FULL[d]}
+                <span
+                  className={cn(
+                    "rounded-full px-1.5 py-0.5 text-[10px] font-semibold",
+                    activeDay === d
+                      ? "bg-primary-500 text-white"
+                      : "bg-[var(--gp-bg)] text-[var(--gp-text-muted)]"
+                  )}
                 >
-                  <div aria-hidden />
-                  {visibleDays.map((i) => {
-                    const isToday = i === TODAY_WEEK_IDX;
-                    return (
-                      <div
-                        key={i}
-                        className={cn(
-                          "rounded-t-lg px-2 py-2 text-center",
-                          isToday && "bg-primary-500/10"
+                  {count}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      {/* ------------------------ main + side ---------------------- */}
+      <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
+        {/* -------------------- schedule surface ------------------- */}
+        <div className="xl:col-span-2">
+          <Card>
+            <CardHeader className="flex-row items-center justify-between">
+              <div>
+                <CardTitle>
+                  {view === "week" ? "Week grid" : `${DAY_FULL[activeDay]} sessions`}
+                </CardTitle>
+                <p className="mt-1 text-xs text-[var(--gp-text-muted)]">
+                  {view === "week"
+                    ? "Click any session for details and drop-in booking"
+                    : `${dayOccurrences.length} session${dayOccurrences.length === 1 ? "" : "s"} scheduled`}
+                </p>
+              </div>
+              <div className="hidden items-center gap-3 sm:flex">
+                {(Object.keys(INTENSITY_UI) as Intensity[]).map((i) => (
+                  <span
+                    key={i}
+                    className="flex items-center gap-1 text-[11px] font-medium text-[var(--gp-text-muted)]"
+                  >
+                    <span className={cn("h-2 w-2 rounded-full", INTENSITY_UI[i].dot)} aria-hidden />
+                    {INTENSITY_UI[i].label}
+                  </span>
+                ))}
+              </div>
+            </CardHeader>
+
+            <CardContent>
+              {view === "week" ? (
+                /* ---------------------- week grid ------------------- */
+                <div className="overflow-x-auto">
+                  <div className="min-w-[760px]">
+                    {/* day header row */}
+                    <div className="grid grid-cols-[52px_repeat(7,1fr)] border-b border-[var(--gp-border)] pb-2">
+                      <div aria-hidden />
+                      {DAYS.map((d) => {
+                        const count = filtered.filter((o) => o.day === d).length;
+                        return (
+                          <div key={d} className="px-1.5 text-center">
+                            <div className="text-xs font-semibold">{d}</div>
+                            <div className="text-[10px] text-[var(--gp-text-muted)]">
+                              {count} session{count === 1 ? "" : "s"}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    {/* time grid */}
+                    <div className="relative grid grid-cols-[52px_repeat(7,1fr)]">
+                      {/* time gutter */}
+                      <div className="relative" style={{ height: gridHeight }}>
+                        {Array.from(
+                          { length: END_HOUR - START_HOUR },
+                          (_, i) => (
+                            <div
+                              key={i}
+                              className="absolute right-2 -translate-y-1/2 text-[10px] font-medium text-[var(--gp-text-muted)]"
+                              style={{ top: i * PX_PER_HOUR }}
+                            >
+                              {fmtTime((START_HOUR + i) * 60).replace(":00", "")}
+                            </div>
+                          )
                         )}
-                      >
-                        <p
+                      </div>
+
+                      {/* day columns */}
+                      {DAYS.map((d) => (
+                        <div
+                          key={d}
+                          className="relative border-l border-[var(--gp-border)]"
+                          style={{ height: gridHeight }}
+                        >
+                          {/* hour lines */}
+                          {Array.from({ length: END_HOUR - START_HOUR }, (_, i) => (
+                            <div
+                              key={i}
+                              className="absolute inset-x-0 border-t border-dashed border-[var(--gp-border)]/60"
+                              style={{ top: i * PX_PER_HOUR }}
+                              aria-hidden
+                            />
+                          ))}
+
+                          {/* blocks */}
+                          {filtered
+                            .filter((o) => o.day === d)
+                            .map((o) => {
+                              const top =
+                                ((Math.max(o.startMin, START_HOUR * 60) - START_HOUR * 60) /
+                                  60) *
+                                PX_PER_HOUR;
+                              const height = Math.max(
+                                46,
+                                ((Math.min(o.endMin, END_HOUR * 60) -
+                                  Math.max(o.startMin, START_HOUR * 60)) /
+                                  60) *
+                                  PX_PER_HOUR
+                              );
+                              const full = o.cls.enrolled >= o.cls.capacity;
+                              const isSelected = selectedKey === o.key;
+                              const isBooked = booked.has(o.key);
+                              return (
+                                <button
+                                  key={o.key}
+                                  type="button"
+                                  onClick={() => openDetail(o)}
+                                  aria-label={`${o.cls.name}, ${DAY_FULL[o.day]} ${fmtTime(o.startMin)}`}
+                                  className={cn(
+                                    "absolute inset-x-1 overflow-hidden rounded-md border border-l-4 px-2 py-1.5 text-left transition-all",
+                                    "focus:outline-none focus:ring-2 focus:ring-primary-500/50",
+                                    INTENSITY_UI[o.cls.intensity].block,
+                                    isSelected && "ring-2 ring-primary-500/60",
+                                    isBooked && "ring-1 ring-primary-400"
+                                  )}
+                                  style={{ top, height }}
+                                >
+                                  <div className="flex items-center justify-between gap-1">
+                                    <span className="truncate text-[11px] font-semibold leading-tight">
+                                      {o.cls.name}
+                                    </span>
+                                    {isBooked && (
+                                      <CheckCircle2
+                                        className="h-3 w-3 shrink-0 text-primary-500"
+                                        aria-label="Booked"
+                                      />
+                                    )}
+                                  </div>
+                                  <div className="mt-0.5 text-[10px] text-[var(--gp-text-muted)]">
+                                    {fmtTime(o.startMin)}
+                                    {height > 56 && ` · ${o.cls.durationMin}m`}
+                                  </div>
+                                  {height > 72 && (
+                                    <div className="mt-1.5 flex items-center gap-1.5">
+                                      <span
+                                        className={cn(
+                                          "h-1.5 flex-1 overflow-hidden rounded-full bg-[var(--gp-bg)]"
+                                        )}
+                                        aria-hidden
+                                      >
+                                        <span
+                                          className={cn(
+                                            "block h-full rounded-full",
+                                            full ? "bg-rose-500" : "bg-primary-500"
+                                          )}
+                                          style={{
+                                            width: `${Math.min(100, Math.round((o.cls.enrolled / o.cls.capacity) * 100))}%`,
+                                          }}
+                                        />
+                                      </span>
+                                      <span className="text-[10px] font-medium text-[var(--gp-text-muted)]">
+                                        {o.cls.enrolled}/{o.cls.capacity}
+                                      </span>
+                                    </div>
+                                  )}
+                                </button>
+                              );
+                            })}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                /* ---------------------- day list ------------------- */
+                <ul className="divide-y divide-[var(--gp-border)]">
+                  {dayOccurrences.length === 0 && (
+                    <li className="py-10 text-center text-sm text-[var(--gp-text-muted)]">
+                      No sessions on {DAY_FULL[activeDay]} with this filter.
+                    </li>
+                  )}
+                  {dayOccurrences.map((o) => {
+                    const trainer = trainerById(o.cls.trainerId);
+                    const pct = Math.min(
+                      100,
+                      Math.round((o.cls.enrolled / o.cls.capacity) * 100)
+                    );
+                    const full = o.cls.enrolled >= o.cls.capacity;
+                    const isSelected = selectedKey === o.key;
+                    return (
+                      <li key={o.key}>
+                        <button
+                          type="button"
+                          onClick={() => openDetail(o)}
                           className={cn(
-                            "text-[11px] font-semibold uppercase tracking-wider",
-                            isToday
-                              ? "text-primary-600 dark:text-primary-400"
-                              : "text-[var(--gp-text-muted)]"
+                            "flex w-full items-center gap-4 px-2 py-3.5 text-left transition-colors hover:bg-[var(--gp-bg)]/60",
+                            isSelected && "bg-primary-500/5"
                           )}
                         >
-                          {DOW_ORDER[i]}
-                        </p>
-                        <p className="text-sm font-bold tabular-nums">
-                          {formatDate(WEEK_DAYS[i], "MMM d")}
-                        </p>
-                      </div>
-                    );
-                  })}
-                </div>
-
-                {/* Time grid */}
-                <div
-                  className="grid gap-px"
-                  style={{
-                    gridTemplateColumns: `56px repeat(${visibleDays.length}, minmax(0,1fr))`,
-                  }}
-                >
-                  {/* Gutter */}
-                  <div className="relative" style={{ height: GRID_H }}>
-                    {HOURS.map((h) => (
-                      <span
-                        key={h}
-                        className="absolute right-2 -translate-y-1/2 text-[10px] font-medium tabular-nums text-[var(--gp-text-muted)]"
-                        style={{ top: ((h * 60 - DAY_START) / 60) * HOUR_H }}
-                      >
-                        {fmtHour(h)}
-                      </span>
-                    ))}
-                  </div>
-
-                  {/* Day columns */}
-                  {visibleDays.map((i) => {
-                    const daySessions = SESSIONS.filter((s) => s.dayIdx === i);
-                    return (
-                      <div
-                        key={i}
-                        className={cn(
-                          "relative rounded-md",
-                          i === TODAY_WEEK_IDX && "bg-primary-500/[0.04]"
-                        )}
-                        style={{ height: GRID_H }}
-                      >
-                        {HOURS.map((h) => (
-                          <div
-                            key={h}
-                            className="absolute inset-x-0 border-t border-slate-200/70 dark:border-slate-800"
-                            style={{ top: ((h * 60 - DAY_START) / 60) * HOUR_H }}
+                          <div className="w-24 shrink-0">
+                            <div className="text-sm font-semibold">
+                              {fmtTime(o.startMin)}
+                            </div>
+                            <div className="text-xs text-[var(--gp-text-muted)]">
+                              {o.cls.durationMin} min
+                            </div>
+                          </div>
+                          <span
+                            className={cn(
+                              "h-9 w-1 shrink-0 rounded-full",
+                              INTENSITY_UI[o.cls.intensity].dot
+                            )}
                             aria-hidden
                           />
-                        ))}
-
-                        {daySessions.map((s) => {
-                          const place = LAYOUT.get(s.id) ?? { col: 0, cols: 1 };
-                          const trainer = trainerById.get(s.trainerId);
-                          const compact = s.duration < 45;
-                          const isSelected = selected?.id === s.id;
-                          const full = s.enrolled >= s.capacity;
-                          return (
-                            <button
-                              key={s.id}
-                              type="button"
-                              onClick={() => setSelected(s)}
-                              aria-label={`${s.name}, ${DOW_FULL[s.dayIdx]} at ${fmtClock(s.start)}`}
-                              className={cn(
-                                "absolute overflow-hidden rounded-md border-l-4 px-2 py-1 text-left transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500",
-                                BLOCK_STYLE[s.intensity],
-                                isSelected && "ring-2 ring-primary-500 shadow-md"
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-2">
+                              <span className="truncate text-sm font-medium">
+                                {o.cls.name}
+                              </span>
+                              <Badge variant={INTENSITY_UI[o.cls.intensity].chip} size="sm">
+                                {INTENSITY_UI[o.cls.intensity].label}
+                              </Badge>
+                              {booked.has(o.key) && (
+                                <Badge variant="gp" size="sm">
+                                  Drop-in
+                                </Badge>
                               )}
-                              style={{
-                                top: ((s.start - DAY_START) / 60) * HOUR_H,
-                                height: Math.max(34, (s.duration / 60) * HOUR_H - 3),
-                                left: `calc(${(place.col * 100) / place.cols}% + 3px)`,
-                                width: `calc(${100 / place.cols}% - 6px)`,
-                              }}
-                            >
-                              <p className="truncate text-[10px] font-semibold tabular-nums opacity-70">
-                                {fmtClock(s.start)}
-                              </p>
-                              <p className="truncate text-xs font-bold leading-tight">
-                                {s.name}
-                              </p>
-                              {!compact && (
-                                <>
-                                  <p className="truncate text-[10px] opacity-80">
-                                    {trainer?.name.split(" ")[0] ?? "—"} · {s.room}
-                                  </p>
-                                  <p
-                                    className={cn(
-                                      "truncate text-[10px] font-semibold tabular-nums",
-                                      full && "text-red-600 dark:text-red-400"
-                                    )}
-                                  >
-                                    {s.enrolled}/{s.capacity} booked
-                                  </p>
-                                </>
-                              )}
-                            </button>
-                          );
-                        })}
-                      </div>
+                            </div>
+                            <div className="mt-1 flex items-center gap-2 text-xs text-[var(--gp-text-muted)]">
+                              {trainer && <Avatar name={trainer.name} size="xs" />}
+                              <span className="truncate">{trainer?.name}</span>
+                              <span aria-hidden>·</span>
+                              <span>{ROOMS[o.cls.id] ?? "Studio"}</span>
+                            </div>
+                          </div>
+                          <div className="hidden w-32 shrink-0 sm:block">
+                            <div className="flex justify-between text-[11px] text-[var(--gp-text-muted)]">
+                              <span>{pct}% full</span>
+                              <span>
+                                {o.cls.enrolled}/{o.cls.capacity}
+                              </span>
+                            </div>
+                            <span className="mt-1 block h-1.5 overflow-hidden rounded-full bg-[var(--gp-bg)]">
+                              <span
+                                className={cn(
+                                  "block h-full rounded-full",
+                                  full ? "bg-rose-500" : "bg-primary-500"
+                                )}
+                                style={{ width: `${pct}%` }}
+                              />
+                            </span>
+                          </div>
+                          <ChevronRight
+                            className="h-4 w-4 shrink-0 text-[var(--gp-text-muted)]"
+                            aria-hidden
+                          />
+                        </button>
+                      </li>
                     );
                   })}
-                </div>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
+                </ul>
+              )}
+            </CardContent>
+          </Card>
+        </div>
 
-        {/* Detail panel */}
-        <aside className="lg:sticky lg:top-6 lg:self-start">
+        {/* ------------------------- side rail ---------------------- */}
+        <div className="space-y-6">
+          {/* detail panel */}
           {selected ? (
-            <Card>
+            <Card variant="elevated">
               <CardHeader className="flex-row items-start justify-between gap-2">
                 <div>
-                  <Badge variant={INTENSITY_VARIANT[selected.intensity]} size="sm">
-                    {INTENSITY_LABEL[selected.intensity]} intensity
-                  </Badge>
-                  <CardTitle className="mt-2">{selected.name}</CardTitle>
+                  <div className="flex items-center gap-2">
+                    <CardTitle>{selected.cls.name}</CardTitle>
+                    <Badge variant={INTENSITY_UI[selected.cls.intensity].chip} size="sm">
+                      {INTENSITY_UI[selected.cls.intensity].label}
+                    </Badge>
+                  </div>
                   <p className="mt-1 text-xs text-[var(--gp-text-muted)]">
-                    {detailDay}, {formatDate(WEEK_DAYS[selected.dayIdx])}
+                    {DAY_FULL[selected.day]} · {fmtTime(selected.startMin)} –{" "}
+                    {fmtTime(selected.endMin)} · {selected.cls.durationMin} min
                   </p>
                 </div>
                 <button
                   type="button"
-                  onClick={() => setSelected(null)}
-                  className="rounded-full p-1.5 text-[var(--gp-text-muted)] transition-colors hover:bg-[var(--gp-surface-2)] hover:text-[var(--gp-text)]"
+                  onClick={closeDetail}
                   aria-label="Close session details"
+                  className="rounded-md p-1 text-[var(--gp-text-muted)] transition-colors hover:bg-[var(--gp-bg)] hover:text-[var(--gp-text)]"
                 >
-                  <X className="h-4 w-4" />
+                  <X className="h-4 w-4" aria-hidden />
                 </button>
               </CardHeader>
               <CardContent className="space-y-4">
-                <dl className="space-y-2.5 text-sm">
-                  <div className="flex items-center justify-between gap-3">
-                    <dt className="flex items-center gap-1.5 text-xs text-[var(--gp-text-muted)]">
-                      <Clock className="h-3.5 w-3.5" />
-                      Time
-                    </dt>
-                    <dd className="font-semibold tabular-nums">
-                      {fmtClock(selected.start)} –{" "}
-                      {fmtClock(selected.start + selected.duration)}
-                      <span className="ml-2 text-xs font-normal text-[var(--gp-text-muted)]">
-                        {formatDuration(selected.duration)}
-                      </span>
-                    </dd>
-                  </div>
-                  <div className="flex items-center justify-between gap-3">
-                    <dt className="flex items-center gap-1.5 text-xs text-[var(--gp-text-muted)]">
-                      <MapPin className="h-3.5 w-3.5" />
-                      Room
-                    </dt>
-                    <dd className="font-semibold">{selected.room}</dd>
-                  </div>
-                </dl>
-
-                <div
-                  className="flex items-center gap-3 rounded-lg border p-3"
-                  style={{ borderColor: "var(--gp-border)" }}
-                >
-                  <Avatar name={detailTrainer?.name ?? "?"} size="md" />
-                  <div className="min-w-0">
-                    <p className="truncate text-sm font-semibold">
-                      {detailTrainer?.name ?? "Unassigned"}
-                    </p>
-                    <p className="truncate text-xs text-[var(--gp-text-muted)]">
-                      {detailTrainer?.specialty ?? ""}
-                    </p>
-                  </div>
-                </div>
-
-                <div>
-                  <div className="flex items-center justify-between text-xs">
-                    <span className="font-semibold">
-                      {selected.enrolled}/{selected.capacity} booked
-                    </span>
-                    <span
-                      className={cn(
-                        "font-medium",
-                        spotsLeft === 0
-                          ? "text-red-600 dark:text-red-400"
-                          : "text-[var(--gp-text-muted)]"
+                {(() => {
+                  const trainer = trainerById(selected.cls.trainerId);
+                  const pct = Math.min(
+                    100,
+                    Math.round((selected.cls.enrolled / selected.cls.capacity) * 100)
+                  );
+                  const full = selected.cls.enrolled >= selected.cls.capacity;
+                  return (
+                    <>
+                      {trainer && (
+                        <div className="flex items-center gap-3 rounded-lg border border-[var(--gp-border)] bg-[var(--gp-bg)]/60 p-3">
+                          <Avatar name={trainer.name} size="md" />
+                          <div className="min-w-0">
+                            <div className="truncate text-sm font-medium">
+                              {trainer.name}
+                            </div>
+                            <div className="truncate text-xs text-[var(--gp-text-muted)]">
+                              {trainer.specialty} · ★ {trainer.rating.toFixed(1)}
+                            </div>
+                          </div>
+                        </div>
                       )}
-                    >
-                      {spotsLeft === 0
-                        ? "Class full"
-                        : `${spotsLeft} spot${spotsLeft === 1 ? "" : "s"} left`}
-                    </span>
-                  </div>
-                  <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-[var(--gp-surface-2)]">
-                    <div
-                      className={cn(
-                        "h-full rounded-full",
-                        spotsLeft === 0
-                          ? "bg-red-500"
-                          : selected.enrolled / selected.capacity >= 0.9
-                            ? "bg-amber-500"
-                            : "bg-[#84cc16]"
-                      )}
-                      style={{
-                        width: `${Math.min(100, (selected.enrolled / selected.capacity) * 100)}%`,
-                      }}
-                    />
-                  </div>
-                </div>
 
-                <Button
-                  className="w-full"
-                  leftIcon={<MessageSquare className="h-4 w-4" />}
-                  onClick={() =>
-                    toast.success(
-                      `Reminder sent to ${selected.enrolled} members · ${selected.name}`
-                    )
-                  }
-                >
-                  Message roster
-                </Button>
+                      <dl className="grid grid-cols-2 gap-3 text-sm">
+                        <div>
+                          <dt className="text-xs text-[var(--gp-text-muted)]">Room</dt>
+                          <dd className="mt-0.5 font-medium">
+                            {ROOMS[selected.cls.id] ?? "Studio"}
+                          </dd>
+                        </div>
+                        <div>
+                          <dt className="text-xs text-[var(--gp-text-muted)]">Duration</dt>
+                          <dd className="mt-0.5 flex items-center gap-1 font-medium">
+                            <Timer className="h-3.5 w-3.5 text-[var(--gp-text-muted)]" aria-hidden />
+                            {selected.cls.durationMin} min
+                          </dd>
+                        </div>
+                        <div>
+                          <dt className="text-xs text-[var(--gp-text-muted)]">Start</dt>
+                          <dd className="mt-0.5 flex items-center gap-1 font-medium">
+                            <Clock className="h-3.5 w-3.5 text-[var(--gp-text-muted)]" aria-hidden />
+                            {fmtTime(selected.startMin)}
+                          </dd>
+                        </div>
+                        <div>
+                          <dt className="text-xs text-[var(--gp-text-muted)]">Repeats</dt>
+                          <dd className="mt-0.5 font-medium">{selected.cls.schedule}</dd>
+                        </div>
+                      </dl>
+
+                      <div>
+                        <div className="flex items-center justify-between text-xs">
+                          <span className="text-[var(--gp-text-muted)]">Enrollment</span>
+                          <span className={cn("font-semibold", full ? "text-rose-500" : "text-primary-600 dark:text-primary-400")}>
+                            {selected.cls.enrolled}/{selected.cls.capacity} · {pct}%
+                          </span>
+                        </div>
+                        <span className="mt-1.5 block h-2 overflow-hidden rounded-full bg-[var(--gp-bg)]">
+                          <span
+                            className={cn("block h-full rounded-full", full ? "bg-rose-500" : "bg-primary-500")}
+                            style={{ width: `${pct}%` }}
+                          />
+                        </span>
+                        {full && (
+                          <p className="mt-1.5 text-xs font-medium text-rose-500">
+                            At capacity — drop-ins join the waitlist.
+                          </p>
+                        )}
+                      </div>
+
+                      <Button
+                        variant={booked.has(selected.key) ? "outline" : "primary"}
+                        className="w-full"
+                        onClick={() => toggleBook(selected)}
+                      >
+                        {booked.has(selected.key)
+                          ? "Release drop-in"
+                          : full
+                            ? "Join waitlist"
+                            : "Book drop-in"}
+                      </Button>
+                    </>
+                  );
+                })()}
               </CardContent>
             </Card>
           ) : (
             <Card>
-              <CardContent className="flex flex-col items-center justify-center gap-3 py-12 text-center">
-                <CalendarClock className="h-8 w-8 text-[var(--gp-text-muted)]" />
-                <p className="text-sm font-medium">No session selected</p>
-                <p className="text-xs text-[var(--gp-text-muted)]">
-                  Click a block in the grid to see time, trainer, room and enrollment.
+              <CardContent className="py-10 text-center">
+                <Maximize2
+                  className="mx-auto h-8 w-8 text-[var(--gp-text-muted)]"
+                  aria-hidden
+                />
+                <p className="mt-3 text-sm font-medium">No session selected</p>
+                <p className="mt-1 text-xs text-[var(--gp-text-muted)]">
+                  Click a block in the grid or a row in the day list to preview
+                  details and book a drop-in.
                 </p>
               </CardContent>
             </Card>
           )}
-        </aside>
+
+          {/* hourly load chart */}
+          <Card>
+            <CardHeader>
+              <CardTitle>Sessions by hour</CardTitle>
+              <p className="mt-1 text-xs text-[var(--gp-text-muted)]">
+                When the floor is busiest this week
+              </p>
+            </CardHeader>
+            <CardContent className="px-2 pb-4 pt-2 sm:px-4">
+              <div className="h-56 w-full">
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart
+                    data={stats.hourChart}
+                    margin={{ top: 4, right: 8, left: -20, bottom: 0 }}
+                  >
+                    <CartesianGrid
+                      strokeDasharray="3 3"
+                      stroke="rgba(148,163,184,0.2)"
+                      vertical={false}
+                    />
+                    <XAxis
+                      dataKey="hour"
+                      tick={{ fontSize: 10, fill: "#94a3b8" }}
+                      tickLine={false}
+                      axisLine={false}
+                      interval="preserveStartEnd"
+                    />
+                    <YAxis
+                      allowDecimals={false}
+                      tick={{ fontSize: 10, fill: "#94a3b8" }}
+                      tickLine={false}
+                      axisLine={false}
+                    />
+                    <Tooltip
+                      cursor={{ fill: "rgba(132,204,22,0.08)" }}
+                      contentStyle={{
+                        background: "var(--gp-surface, #fff)",
+                        border: "1px solid var(--gp-border, #e2e8f0)",
+                        borderRadius: 8,
+                        fontSize: 12,
+                      }}
+                      formatter={(value) => [`${value} sessions`, "Scheduled"]}
+                    />
+                    <Bar dataKey="sessions" radius={[4, 4, 0, 0]}>
+                      {stats.hourChart.map((entry, i) => (
+                        <Cell
+                          key={i}
+                          fill={
+                            entry.sessions === stats.peakCount && stats.peakCount > 0
+                              ? CHART_COLOR.high
+                              : "#84cc16"
+                          }
+                          fillOpacity={0.85}
+                        />
+                      ))}
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
       </div>
     </div>
   );
